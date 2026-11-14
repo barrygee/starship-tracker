@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Starship Tracker</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  html, body, #map { height: 100%; margin: 0; background: #0b0b0b; }
+  #status { position: absolute; top: 10px; right: 10px; z-index: 1000; background: #111;
+    color: #c6ff00; font: 12px monospace; padding: 6px 10px; border: 1px solid #333; }
+  .leaflet-popup-content { font: 12px monospace; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="status">loading…</div>
+<script>
+// Try the live feed directly first; if the browser blocks it (CORS),
+// fall back to data.json, which the GitHub Action keeps updated.
+const SOURCES = [
+  "https://sxcontent9668.azureedge.us/cms-assets/starship_tracker_public.json",
+  "data.json"
+];
+const REFRESH_MS = 30000;
+
+const LAT_KEYS = ["lat", "latitude", "lat_deg", "latitude_deg"];
+const LON_KEYS = ["lon", "lng", "long", "longitude", "lon_deg", "longitude_deg"];
+
+function findPoints(node, path = "root", out = []) {
+  if (Array.isArray(node)) {
+    const isPairs = node.length && node.every(p => Array.isArray(p) && p.length >= 2 &&
+      typeof p[0] === "number" && typeof p[1] === "number");
+    if (isPairs) {
+      node.forEach((p, i) => {
+        let [a, b] = p;
+        const [lat, lon] = Math.abs(a) > 90 ? [b, a] : [a, b];
+        out.push({ lat, lon, path: `${path}[${i}]`, info: {}, track: path });
+      });
+    } else {
+      node.forEach((v, i) => findPoints(v, `${path}[${i}]`, out));
+    }
+  } else if (node && typeof node === "object") {
+    const keys = Object.keys(node);
+    const latK = keys.find(k => LAT_KEYS.includes(k.toLowerCase()));
+    const lonK = keys.find(k => LON_KEYS.includes(k.toLowerCase()));
+    if (latK && lonK) {
+      const lat = parseFloat(node[latK]), lon = parseFloat(node[lonK]);
+      if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+        const info = {};
+        keys.forEach(k => { if (typeof node[k] !== "object") info[k] = node[k]; });
+        out.push({ lat, lon, path, info });
+      }
+    }
+    keys.forEach(k => findPoints(node[k], `${path}.${k}`, out));
+  }
+  return out;
+}
+
+const map = L.map("map").setView([25.99, -97.15], 4); // Starbase, TX
+L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+  { attribution: "&copy; OpenStreetMap &copy; CARTO" }).addTo(map);
+const layer = L.layerGroup().addTo(map);
+let firstFit = true;
+
+async function load() {
+  for (const url of SOURCES) {
+    try {
+      const res = await fetch(url + (url.startsWith("http") ? "" : `?t=${Date.now()}`), { cache: "no-store" });
+      if (res.ok) return { data: await res.json(), source: url.startsWith("http") ? "live" : "cached" };
+    } catch (e) { /* try next source */ }
+  }
+  throw new Error("no data source reachable");
+}
+
+async function refresh() {
+  const status = document.getElementById("status");
+  try {
+    const { data, source } = await load();
+    const points = findPoints(data);
+    layer.clearLayers();
+    const tracks = {};
+    points.forEach(p => {
+      if (p.track) { (tracks[p.track] ||= []).push([p.lat, p.lon]); return; }
+      const html = `<b>${p.path}</b><br>` +
+        Object.entries(p.info).map(([k, v]) => `${k}: ${v}`).join("<br>");
+      L.circleMarker([p.lat, p.lon], { radius: 6, color: "#c6ff00", fillOpacity: 0.9 })
+        .bindPopup(html).addTo(layer);
+    });
+    Object.values(tracks).forEach(t => L.polyline(t, { color: "#c6ff00", weight: 2 }).addTo(layer));
+    if (firstFit && points.length) {
+      map.fitBounds(points.map(p => [p.lat, p.lon]), { padding: [40, 40], maxZoom: 8 });
+      firstFit = false;
+    }
+    status.textContent = `${points.length} points · ${source} · ${new Date().toLocaleTimeString()}`;
+    if (!points.length) console.log("No coordinates found. Raw JSON:", data);
+  } catch (e) {
+    status.textContent = "error: " + e.message;
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>
